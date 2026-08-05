@@ -268,12 +268,13 @@ function tickRoom(code, room) {
     if (!player.alive) continue;
     if (now < player.nextMoveAt) continue;
     if (player.isBot && !chooseBotDirection(room, player)) {
+      const deathCell = player.snake[0];
       player.alive = false;
       player.deaths += 1;
       player.lives -= 1;
       player.respawnAt = now + 1800;
       player.snake = [];
-      broadcast(code, { type: "death", victimId: player.id, killerId: null, lives: player.lives, reason: "trapped" });
+      broadcast(code, { type: "death", victimId: player.id, killerId: null, lives: player.lives, reason: "trapped", x: deathCell?.x, y: deathCell?.y });
       if (player.lives <= 0) {
         const human = [...room.players.values()].find((candidate) => !candidate.isBot);
         if (human) finishRun(code, room, human, "ai-defeated");
@@ -291,7 +292,7 @@ function tickRoom(code, room) {
       if (room.mode !== "online") player.lives -= 1;
       player.respawnAt = now + 1800;
       player.snake = [];
-      event = { type: "death", victimId: player.id, killerId: hit && hit.player.id !== player.id ? hit.player.id : null, lives: player.lives };
+      event = { type: "death", victimId: player.id, killerId: hit && hit.player.id !== player.id ? hit.player.id : null, lives: player.lives, x: head.x, y: head.y };
       if (hit && hit.player.id !== player.id) {
         hit.player.score += 2;
         hit.player.totalStars += 2;
