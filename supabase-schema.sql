@@ -7,6 +7,10 @@ create table if not exists public.player_saves (
   updated_at timestamptz not null default now()
 );
 
+alter table public.player_saves
+add column if not exists best_solo_length integer not null default 0
+check (best_solo_length >= 0);
+
 alter table public.player_saves enable row level security;
 
 create policy "Players can read their own save"
