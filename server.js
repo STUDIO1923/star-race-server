@@ -20,6 +20,7 @@ const FRUIT_TYPES = [
 const supabaseUrl = String(process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const supabaseServiceKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "");
 const persistenceEnabled = Boolean(supabaseUrl && supabaseServiceKey);
+let soloLeaderboard = [];
 
 async function supabaseRequest(path, options = {}) {
   if (!persistenceEnabled) return null;
@@ -41,8 +42,14 @@ async function authenticatedUser(accessToken) {
 }
 
 async function loadSave(userId) {
-  const rows = await supabaseRequest(`/rest/v1/player_saves?user_id=eq.${encodeURIComponent(userId)}&select=total_stars,display_name&limit=1`);
-  return rows?.[0] ?? { total_stars: 0 };
+  const rows = await supabaseRequest(`/rest/v1/player_saves?user_id=eq.${encodeURIComponent(userId)}&select=total_stars,display_name,best_solo_length&limit=1`);
+  return rows?.[0] ?? { total_stars: 0, best_solo_length: 0 };
+}
+
+async function refreshSoloLeaderboard() {
+  if (!persistenceEnabled) return;
+  const rows = await supabaseRequest("/rest/v1/player_saves?select=display_name,best_solo_length&best_solo_length=gt.0&order=best_solo_length.desc&limit=10");
+  soloLeaderboard = (rows ?? []).map((row) => ({ name: row.display_name || "Player", length: Number(row.best_solo_length || 0) }));
 }
 
 function saveProgress(player) {
@@ -50,8 +57,8 @@ function saveProgress(player) {
   supabaseRequest("/rest/v1/player_saves?on_conflict=user_id", {
     method: "POST",
     headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify({ user_id: player.id, display_name: player.name, total_stars: player.totalStars, updated_at: new Date().toISOString() }),
-  }).catch(() => {});
+    body: JSON.stringify({ user_id: player.id, display_name: player.name, total_stars: player.totalStars, best_solo_length: player.bestSoloLength || 0, updated_at: new Date().toISOString() }),
+  }).then(() => player.mode === "solo" && refreshSoloLeaderboard()).catch(() => {});
 }
 
 function clean(value, max = 24) {
@@ -97,9 +104,9 @@ function addBoost(room) {
   if (!room.boosts.length) room.boosts.push(freeCell(room));
 }
 
-function getRoom(code) {
+function getRoom(code, mode = "online") {
   if (!rooms.has(code)) {
-    const room = { players: new Map(), foods: [], boosts: [] };
+    const room = { players: new Map(), foods: [], boosts: [], mode };
     rooms.set(code, room);
     addFood(room);
     addBoost(room);
@@ -110,7 +117,7 @@ function getRoom(code) {
 function snapshot(code, event) {
   const room = getRoom(code);
   return {
-    type: "state", room: code, gridWidth: GRID_W, gridHeight: GRID_H, foods: room.foods, boosts: room.boosts, event,
+    type: "state", room: code, mode: room.mode, gridWidth: GRID_W, gridHeight: GRID_H, foods: room.foods, boosts: room.boosts, soloLeaderboard, event,
     players: [...room.players.values()].map(({ socket, ...player }) => player).sort((a, b) => b.score - a.score || b.snake.length - a.snake.length),
   };
 }
@@ -201,6 +208,10 @@ function tickRoom(code, room) {
     }
     if (player.grow > 0) player.grow -= 1;
     else player.snake.pop();
+    if (player.mode === "solo" && player.authenticated && player.snake.length > player.bestSoloLength) {
+      player.bestSoloLength = player.snake.length;
+      saveProgress(player);
+    }
   }
   broadcast(code, event);
 }
@@ -208,6 +219,8 @@ function tickRoom(code, room) {
 setInterval(() => {
   for (const [code, room] of rooms) tickRoom(code, room);
 }, TICK_MS);
+refreshSoloLeaderboard().catch(() => {});
+setInterval(() => refreshSoloLeaderboard().catch(() => {}), 30000);
 
 const server = http.createServer((_request, response) => {
   response.setHeader("access-control-allow-origin", "*");
@@ -229,21 +242,23 @@ wss.on("connection", (socket) => {
           console.error("Auth lookup failed; continuing as guest:", error.message);
           return null;
         });
-        currentRoom = clean(data.room, 6).toUpperCase() || "SNAKE1";
         currentPlayer = user?.id || clean(data.playerId, 48);
         if (!currentPlayer) return;
-        const room = getRoom(currentRoom);
+        const mode = data.mode === "solo" ? "solo" : "online";
+        currentRoom = mode === "solo" ? `SOLO-${currentPlayer}` : (clean(data.room, 6).toUpperCase() || "SNAKE1");
+        const room = getRoom(currentRoom, mode);
         const previous = room.players.get(currentPlayer);
         const saved = user
           ? await loadSave(user.id).catch((error) => {
               console.error("Save lookup failed; starting with zero:", error.message);
-              return { total_stars: 0 };
+              return { total_stars: 0, best_solo_length: 0 };
             })
-          : { total_stars: 0 };
+          : { total_stars: 0, best_solo_length: 0 };
         const player = {
           id: currentPlayer, name: clean(data.name, 16) || "Player",
           color: /^#[0-9a-f]{6}$/i.test(data.color ?? "") ? data.color : "#4dabf7",
           score: previous?.score ?? 0, totalStars: Number(saved.total_stars || 0), authenticated: Boolean(user),
+          mode, bestSoloLength: Number(saved.best_solo_length || 0),
           socket, snake: previous?.snake ?? [], dir: "right", nextDir: "right", grow: 0,
           boostUntil: previous?.boostUntil ?? 0, nextMoveAt: Date.now(),
           alive: true, kills: previous?.kills ?? 0, deaths: previous?.deaths ?? 0,
