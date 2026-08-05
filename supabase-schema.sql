@@ -15,6 +15,11 @@ alter table public.player_saves
 add column if not exists best_ai_level integer not null default 0 check (best_ai_level between 0 and 10),
 add column if not exists best_ai_score integer not null default 0 check (best_ai_score >= 0);
 
+alter table public.player_saves
+add column if not exists best_solo_time_ms bigint not null default 0 check (best_solo_time_ms >= 0),
+add column if not exists best_ai_survival_ms bigint not null default 0 check (best_ai_survival_ms >= 0),
+add column if not exists best_ai_length integer not null default 0 check (best_ai_length >= 0);
+
 alter table public.player_saves enable row level security;
 
 create policy "Players can read their own save"

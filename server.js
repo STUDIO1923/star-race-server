@@ -44,20 +44,20 @@ async function authenticatedUser(accessToken) {
 }
 
 async function loadSave(userId) {
-  const rows = await supabaseRequest(`/rest/v1/player_saves?user_id=eq.${encodeURIComponent(userId)}&select=total_stars,display_name,best_solo_length,best_ai_level,best_ai_score&limit=1`);
+  const rows = await supabaseRequest(`/rest/v1/player_saves?user_id=eq.${encodeURIComponent(userId)}&select=total_stars,display_name,best_solo_length,best_solo_time_ms,best_ai_level,best_ai_score,best_ai_survival_ms,best_ai_length&limit=1`);
   return rows?.[0] ?? { total_stars: 0, best_solo_length: 0, best_ai_level: 0, best_ai_score: 0 };
 }
 
 async function refreshSoloLeaderboard() {
   if (!persistenceEnabled) return;
-  const rows = await supabaseRequest("/rest/v1/player_saves?select=display_name,best_solo_length&best_solo_length=gt.0&order=best_solo_length.desc&limit=10");
-  soloLeaderboard = (rows ?? []).map((row) => ({ name: row.display_name || "Player", length: Number(row.best_solo_length || 0) }));
+  const rows = await supabaseRequest("/rest/v1/player_saves?select=display_name,best_solo_length,best_solo_time_ms&best_solo_length=gt.0&order=best_solo_length.desc,best_solo_time_ms.asc&limit=10");
+  soloLeaderboard = (rows ?? []).map((row) => ({ name: row.display_name || "Player", length: Number(row.best_solo_length || 0), timeMs: Number(row.best_solo_time_ms || 0) }));
 }
 
 async function refreshAiLeaderboard() {
   if (!persistenceEnabled) return;
-  const rows = await supabaseRequest("/rest/v1/player_saves?select=display_name,best_ai_level,best_ai_score&best_ai_level=gt.0&order=best_ai_level.desc,best_ai_score.desc&limit=10");
-  aiLeaderboard = (rows ?? []).map((row) => ({ name: row.display_name || "Player", level: Number(row.best_ai_level || 0), score: Number(row.best_ai_score || 0) }));
+  const rows = await supabaseRequest("/rest/v1/player_saves?select=display_name,best_ai_level,best_ai_survival_ms,best_ai_length&best_ai_survival_ms=gt.0&order=best_ai_level.desc,best_ai_survival_ms.desc,best_ai_length.desc&limit=10");
+  aiLeaderboard = (rows ?? []).map((row) => ({ name: row.display_name || "Player", level: Number(row.best_ai_level || 0), survivalMs: Number(row.best_ai_survival_ms || 0), length: Number(row.best_ai_length || 0) }));
 }
 
 function saveProgress(player) {
@@ -65,7 +65,7 @@ function saveProgress(player) {
   supabaseRequest("/rest/v1/player_saves?on_conflict=user_id", {
     method: "POST",
     headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify({ user_id: player.id, display_name: player.name, total_stars: player.totalStars, best_solo_length: player.bestSoloLength || 0, best_ai_level: player.bestAiLevel || 0, best_ai_score: player.bestAiScore || 0, updated_at: new Date().toISOString() }),
+    body: JSON.stringify({ user_id: player.id, display_name: player.name, total_stars: player.totalStars, best_solo_length: player.bestSoloLength || 0, best_solo_time_ms: player.bestSoloTimeMs || 0, best_ai_level: player.bestAiLevel || 0, best_ai_score: player.bestAiScore || 0, best_ai_survival_ms: player.bestAiSurvivalMs || 0, best_ai_length: player.bestAiLength || 0, updated_at: new Date().toISOString() }),
   }).then(() => player.mode === "solo" ? refreshSoloLeaderboard() : player.mode === "ai" ? refreshAiLeaderboard() : null).catch(() => {});
 }
 
@@ -77,6 +77,7 @@ function freeCell(room) {
   const occupied = new Set([
     ...room.foods.map((c) => `${c.x},${c.y}`),
     ...room.boosts.map((c) => `${c.x},${c.y}`),
+    ...room.hearts.map((c) => `${c.x},${c.y}`),
     ...[...room.players.values()].flatMap((p) => p.snake.map((c) => `${c.x},${c.y}`)),
   ]);
   for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -112,9 +113,13 @@ function addBoost(room) {
   if (!room.boosts.length) room.boosts.push(freeCell(room));
 }
 
+function addHeart(room) {
+  room.hearts.push(freeCell(room));
+}
+
 function getRoom(code, mode = "online", difficulty = 1) {
   if (!rooms.has(code)) {
-    const room = { players: new Map(), foods: [], boosts: [], mode, difficulty, finished: false };
+    const room = { players: new Map(), foods: [], boosts: [], hearts: [], mode, difficulty, finished: false, startedAt: Date.now() };
     rooms.set(code, room);
     addFood(room);
     addBoost(room);
@@ -125,7 +130,7 @@ function getRoom(code, mode = "online", difficulty = 1) {
 function snapshot(code, event) {
   const room = getRoom(code);
   return {
-    type: "state", room: code, mode: room.mode, difficulty: room.difficulty, targetScore: AI_TARGET_SCORE, gridWidth: GRID_W, gridHeight: GRID_H, foods: room.foods, boosts: room.boosts, soloLeaderboard, aiLeaderboard, event,
+    type: "state", room: code, mode: room.mode, difficulty: room.difficulty, startedAt: room.startedAt, gridWidth: GRID_W, gridHeight: GRID_H, foods: room.foods, boosts: room.boosts, hearts: room.hearts, soloLeaderboard, aiLeaderboard, event,
     players: [...room.players.values()].map(({ socket, ...player }) => player).sort((a, b) => b.score - a.score || b.snake.length - a.snake.length),
   };
 }
@@ -162,7 +167,7 @@ function chooseBotDirection(room, player) {
 function addAiPlayer(room, code) {
   const id = `BOT-${code}`;
   if (room.players.has(id)) return;
-  room.players.set(id, { id, name: `AI Lv.${room.difficulty}`, color: "#ff3b5c", score: 0, totalStars: 0, authenticated: false, socket: null, snake: spawnSnake(room), dir: "left", nextDir: "left", grow: 0, boostUntil: 0, nextMoveAt: Date.now(), moveMs: 185 - room.difficulty * 10, alive: true, kills: 0, deaths: 0, mode: "ai", isBot: true, bestSoloLength: 0, bestAiLevel: 0, bestAiScore: 0 });
+  room.players.set(id, { id, name: `AI Lv.${room.difficulty}`, color: "#ff3b5c", score: 0, totalStars: 0, authenticated: false, socket: null, snake: spawnSnake(room), dir: "left", nextDir: "left", grow: 0, boostUntil: 0, nextMoveAt: Date.now(), moveMs: 185 - room.difficulty * 10, alive: true, lives: 3, maxLength: 4, nextHeartAt: 100, kills: 0, deaths: 0, mode: "ai", isBot: true, bestSoloLength: 0, bestAiLevel: 0, bestAiScore: 0, bestAiSurvivalMs: 0, bestAiLength: 0 });
 }
 
 function opposite(a, b) {
@@ -186,6 +191,23 @@ function respawn(room, player) {
   player.nextMoveAt = Date.now();
 }
 
+function finishRun(code, room, player, reason = "hearts") {
+  if (room.finished || player.isBot) return;
+  room.finished = true;
+  const elapsedMs = Date.now() - room.startedAt;
+  if (player.authenticated && player.mode === "solo") {
+    if (player.maxLength > player.bestSoloLength || (player.maxLength === player.bestSoloLength && (!player.bestSoloTimeMs || elapsedMs < player.bestSoloTimeMs))) {
+      player.bestSoloLength = player.maxLength; player.bestSoloTimeMs = elapsedMs; saveProgress(player);
+    }
+  }
+  if (player.authenticated && player.mode === "ai") {
+    if (room.difficulty > player.bestAiLevel || (room.difficulty === player.bestAiLevel && (elapsedMs > player.bestAiSurvivalMs || (elapsedMs === player.bestAiSurvivalMs && player.maxLength > player.bestAiLength)))) {
+      player.bestAiLevel = room.difficulty; player.bestAiSurvivalMs = elapsedMs; player.bestAiLength = player.maxLength; saveProgress(player);
+    }
+  }
+  broadcast(code, { type: "gameOver", playerId: player.id, reason, elapsedMs, length: player.maxLength });
+}
+
 function tickRoom(code, room) {
   if (!room.players.size) return;
   const now = Date.now();
@@ -207,16 +229,24 @@ function tickRoom(code, room) {
     if (outside || hit) {
       player.alive = false;
       player.deaths += 1;
-      event = { type: "death", victimId: player.id, killerId: hit && hit.player.id !== player.id ? hit.player.id : null };
+      if (room.mode !== "online") player.lives -= 1;
+      event = { type: "death", victimId: player.id, killerId: hit && hit.player.id !== player.id ? hit.player.id : null, lives: player.lives };
       if (hit && hit.player.id !== player.id) {
         hit.player.score += 2;
         hit.player.totalStars += 2;
         hit.player.grow += 2;
         hit.player.kills += 1;
-        saveProgress(hit.player);
+        if (room.mode === "online") saveProgress(hit.player);
+      }
+      if (room.mode !== "online" && player.lives <= 0) {
+        if (player.isBot) {
+          const human = [...room.players.values()].find((candidate) => !candidate.isBot);
+          if (human) finishRun(code, room, human, "ai-defeated");
+        } else finishRun(code, room, player, "hearts");
+        continue;
       }
       setTimeout(() => {
-        if (room.players.has(player.id)) {
+        if (room.players.has(player.id) && !room.finished) {
           respawn(room, player);
           broadcast(code, { type: "respawn", playerId: player.id });
         }
@@ -233,6 +263,11 @@ function tickRoom(code, room) {
       event = { type: "speed", playerId: player.id, duration: BOOST_DURATION_MS };
       addBoost(room);
     }
+    const heartIndex = room.hearts.findIndex((heart) => heart.x === head.x && heart.y === head.y);
+    if (heartIndex >= 0 && player.lives < 3) {
+      room.hearts.splice(heartIndex, 1); player.lives += 1;
+      event = { type: "heart", playerId: player.id, lives: player.lives };
+    }
     const foodIndex = room.foods.findIndex((food) => food.x === head.x && food.y === head.y);
     if (foodIndex >= 0) {
       const [fruit] = room.foods.splice(foodIndex, 1);
@@ -240,35 +275,15 @@ function tickRoom(code, room) {
       player.totalStars += fruit.points;
       player.grow += fruit.growth;
       event = { type: "fruit", playerId: player.id, kind: fruit.kind, points: fruit.points };
-      saveProgress(player);
+      if (room.mode === "online") saveProgress(player);
       addFood(room);
     }
     if (player.grow > 0) player.grow -= 1;
     else player.snake.pop();
-    if (player.mode === "solo" && player.authenticated && player.snake.length > player.bestSoloLength) {
-      player.bestSoloLength = player.snake.length;
-      saveProgress(player);
-    }
-  }
-  if (room.mode === "ai" && !room.finished) {
-    const winner = [...room.players.values()].find((player) => player.score >= AI_TARGET_SCORE);
-    if (winner) {
-      room.finished = true;
-      const human = [...room.players.values()].find((player) => !player.isBot);
-      if (!winner.isBot && human?.authenticated) {
-        if (room.difficulty > human.bestAiLevel || (room.difficulty === human.bestAiLevel && human.score > human.bestAiScore)) {
-          human.bestAiLevel = room.difficulty;
-          human.bestAiScore = human.score;
-          saveProgress(human);
-        }
-      }
-      event = { type: "matchEnd", winnerId: winner.id, playerId: human?.id, difficulty: room.difficulty };
-      setTimeout(() => {
-        if (!rooms.has(code)) return;
-        for (const player of room.players.values()) { player.score = 0; respawn(room, player); }
-        room.finished = false;
-        broadcast(code, { type: "newMatch" });
-      }, 3500);
+    player.maxLength = Math.max(player.maxLength, player.snake.length);
+    while (player.maxLength >= player.nextHeartAt) { addHeart(room); player.nextHeartAt += 100; }
+    if (player.snake.length >= GRID_W * GRID_H) {
+      finishRun(code, room, player, "full-board");
     }
   }
   broadcast(code, event);
@@ -312,18 +327,18 @@ wss.on("connection", (socket) => {
         const saved = user
           ? await loadSave(user.id).catch((error) => {
               console.error("Save lookup failed; starting with zero:", error.message);
-              return { total_stars: 0, best_solo_length: 0, best_ai_level: 0, best_ai_score: 0 };
+              return { total_stars: 0, best_solo_length: 0, best_solo_time_ms: 0, best_ai_level: 0, best_ai_score: 0, best_ai_survival_ms: 0, best_ai_length: 0 };
             })
-          : { total_stars: 0, best_solo_length: 0, best_ai_level: 0, best_ai_score: 0 };
+          : { total_stars: 0, best_solo_length: 0, best_solo_time_ms: 0, best_ai_level: 0, best_ai_score: 0, best_ai_survival_ms: 0, best_ai_length: 0 };
         const player = {
           id: currentPlayer, name: clean(data.name, 16) || "Player",
           color: /^#[0-9a-f]{6}$/i.test(data.color ?? "") ? data.color : "#4dabf7",
           score: previous?.score ?? 0, totalStars: Number(saved.total_stars || 0), authenticated: Boolean(user),
-          mode, bestSoloLength: Number(saved.best_solo_length || 0),
-          bestAiLevel: Number(saved.best_ai_level || 0), bestAiScore: Number(saved.best_ai_score || 0), moveMs: NORMAL_MOVE_MS, isBot: false,
+          mode, bestSoloLength: Number(saved.best_solo_length || 0), bestSoloTimeMs: Number(saved.best_solo_time_ms || 0),
+          bestAiLevel: Number(saved.best_ai_level || 0), bestAiScore: Number(saved.best_ai_score || 0), bestAiSurvivalMs: Number(saved.best_ai_survival_ms || 0), bestAiLength: Number(saved.best_ai_length || 0), moveMs: NORMAL_MOVE_MS, isBot: false,
           socket, snake: previous?.snake ?? [], dir: "right", nextDir: "right", grow: 0,
           boostUntil: previous?.boostUntil ?? 0, nextMoveAt: Date.now(),
-          alive: true, kills: previous?.kills ?? 0, deaths: previous?.deaths ?? 0,
+          alive: true, lives: mode === "online" ? 0 : 3, maxLength: 4, nextHeartAt: 100, kills: previous?.kills ?? 0, deaths: previous?.deaths ?? 0,
         };
         if (!player.snake.length) player.snake = spawnSnake(room);
         room.players.set(currentPlayer, player);
