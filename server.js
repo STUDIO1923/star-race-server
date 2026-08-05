@@ -195,17 +195,28 @@ function finishRun(code, room, player, reason = "hearts") {
   if (room.finished || player.isBot) return;
   room.finished = true;
   const elapsedMs = Date.now() - room.startedAt;
-  if (player.authenticated && player.mode === "solo") {
-    if (player.maxLength > player.bestSoloLength || (player.maxLength === player.bestSoloLength && (!player.bestSoloTimeMs || elapsedMs < player.bestSoloTimeMs))) {
-      player.bestSoloLength = player.maxLength; player.bestSoloTimeMs = elapsedMs; saveProgress(player);
-    }
-  }
-  if (player.authenticated && player.mode === "ai") {
-    if (room.difficulty > player.bestAiLevel || (room.difficulty === player.bestAiLevel && (elapsedMs > player.bestAiSurvivalMs || (elapsedMs === player.bestAiSurvivalMs && player.maxLength > player.bestAiLength)))) {
-      player.bestAiLevel = room.difficulty; player.bestAiSurvivalMs = elapsedMs; player.bestAiLength = player.maxLength; saveProgress(player);
-    }
-  }
+  player.pendingResult = { elapsedMs, length: player.maxLength, difficulty: room.difficulty };
   broadcast(code, { type: "gameOver", playerId: player.id, reason, elapsedMs, length: player.maxLength });
+}
+
+function savePendingResult(room, player) {
+  const result = player.pendingResult;
+  if (!result || !player.authenticated) return;
+  if (player.mode === "solo" && (result.length > player.bestSoloLength || (result.length === player.bestSoloLength && (!player.bestSoloTimeMs || result.elapsedMs < player.bestSoloTimeMs)))) {
+    player.bestSoloLength = result.length; player.bestSoloTimeMs = result.elapsedMs; saveProgress(player);
+  }
+  if (player.mode === "ai" && (result.difficulty > player.bestAiLevel || (result.difficulty === player.bestAiLevel && (result.elapsedMs > player.bestAiSurvivalMs || (result.elapsedMs === player.bestAiSurvivalMs && result.length > player.bestAiLength))))) {
+    player.bestAiLevel = result.difficulty; player.bestAiSurvivalMs = result.elapsedMs; player.bestAiLength = result.length; saveProgress(player);
+  }
+}
+
+function restartRoom(code, room, player) {
+  savePendingResult(room, player);
+  room.hearts = []; room.finished = false; room.startedAt = Date.now();
+  for (const contestant of room.players.values()) {
+    contestant.lives = 3; contestant.maxLength = 4; contestant.nextHeartAt = 100; contestant.score = 0; contestant.pendingResult = null; respawn(room, contestant);
+  }
+  broadcast(code, { type: "newGame", playerId: player.id });
 }
 
 function tickRoom(code, room) {
@@ -349,6 +360,11 @@ wss.on("connection", (socket) => {
         const player = getRoom(currentRoom).players.get(currentPlayer);
         const direction = clean(data.direction, 5);
         if (player?.alive && ["up", "down", "left", "right"].includes(direction) && !opposite(player.dir, direction)) player.nextDir = direction;
+      }
+      if (data.type === "restart" && currentRoom) {
+        const room = getRoom(currentRoom);
+        const player = room.players.get(currentPlayer);
+        if (player && room.finished) restartRoom(currentRoom, room, player);
       }
     } catch {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "error", message: "invalid message" }));
