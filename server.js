@@ -267,7 +267,19 @@ function tickRoom(code, room) {
   for (const player of room.players.values()) {
     if (!player.alive) continue;
     if (now < player.nextMoveAt) continue;
-    if (player.isBot && !chooseBotDirection(room, player)) { player.nextMoveAt = now + player.moveMs; continue; }
+    if (player.isBot && !chooseBotDirection(room, player)) {
+      player.alive = false;
+      player.deaths += 1;
+      player.lives -= 1;
+      player.respawnAt = now + 1800;
+      player.snake = [];
+      broadcast(code, { type: "death", victimId: player.id, killerId: null, lives: player.lives, reason: "trapped" });
+      if (player.lives <= 0) {
+        const human = [...room.players.values()].find((candidate) => !candidate.isBot);
+        if (human) finishRun(code, room, human, "ai-defeated");
+      }
+      continue;
+    }
     player.nextMoveAt = now + (player.boostUntil > now ? BOOST_MOVE_MS : (player.moveMs || NORMAL_MOVE_MS));
     const head = nextHead(player);
     const outside = head.x < 0 || head.x >= GRID_W || head.y < 0 || head.y >= GRID_H;
