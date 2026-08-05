@@ -6,7 +6,10 @@ const rooms = new Map();
 const GRID_W = 60;
 const GRID_H = 40;
 const FOOD_COUNT = 10;
-const TICK_MS = 125;
+const TICK_MS = 60;
+const NORMAL_MOVE_MS = 125;
+const BOOST_MOVE_MS = 65;
+const BOOST_DURATION_MS = 5000;
 const FRUIT_TYPES = [
   { kind: "apple", points: 1, growth: 2, weight: 34 },
   { kind: "orange", points: 1, growth: 2, weight: 26 },
@@ -58,6 +61,7 @@ function clean(value, max = 24) {
 function freeCell(room) {
   const occupied = new Set([
     ...room.foods.map((c) => `${c.x},${c.y}`),
+    ...room.boosts.map((c) => `${c.x},${c.y}`),
     ...[...room.players.values()].flatMap((p) => p.snake.map((c) => `${c.x},${c.y}`)),
   ]);
   for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -89,11 +93,16 @@ function addFood(room) {
   }
 }
 
+function addBoost(room) {
+  if (!room.boosts.length) room.boosts.push(freeCell(room));
+}
+
 function getRoom(code) {
   if (!rooms.has(code)) {
-    const room = { players: new Map(), foods: [] };
+    const room = { players: new Map(), foods: [], boosts: [] };
     rooms.set(code, room);
     addFood(room);
+    addBoost(room);
   }
   return rooms.get(code);
 }
@@ -101,7 +110,7 @@ function getRoom(code) {
 function snapshot(code, event) {
   const room = getRoom(code);
   return {
-    type: "state", room: code, gridWidth: GRID_W, gridHeight: GRID_H, foods: room.foods, event,
+    type: "state", room: code, gridWidth: GRID_W, gridHeight: GRID_H, foods: room.foods, boosts: room.boosts, event,
     players: [...room.players.values()].map(({ socket, ...player }) => player).sort((a, b) => b.score - a.score || b.snake.length - a.snake.length),
   };
 }
@@ -130,10 +139,13 @@ function respawn(room, player) {
   player.nextDir = "right";
   player.alive = true;
   player.grow = 0;
+  player.boostUntil = 0;
+  player.nextMoveAt = Date.now();
 }
 
 function tickRoom(code, room) {
   if (!room.players.size) return;
+  const now = Date.now();
   const bodies = new Map();
   for (const player of room.players.values()) {
     if (!player.alive) continue;
@@ -143,6 +155,8 @@ function tickRoom(code, room) {
   let event;
   for (const player of room.players.values()) {
     if (!player.alive) continue;
+    if (now < player.nextMoveAt) continue;
+    player.nextMoveAt = now + (player.boostUntil > now ? BOOST_MOVE_MS : NORMAL_MOVE_MS);
     const head = nextHead(player);
     const outside = head.x < 0 || head.x >= GRID_W || head.y < 0 || head.y >= GRID_H;
     const hit = bodies.get(`${head.x},${head.y}`);
@@ -167,6 +181,14 @@ function tickRoom(code, room) {
     }
 
     player.snake.unshift(head);
+    const boostIndex = room.boosts.findIndex((boost) => boost.x === head.x && boost.y === head.y);
+    if (boostIndex >= 0) {
+      room.boosts.splice(boostIndex, 1);
+      player.boostUntil = now + BOOST_DURATION_MS;
+      player.nextMoveAt = now + BOOST_MOVE_MS;
+      event = { type: "speed", playerId: player.id, duration: BOOST_DURATION_MS };
+      addBoost(room);
+    }
     const foodIndex = room.foods.findIndex((food) => food.x === head.x && food.y === head.y);
     if (foodIndex >= 0) {
       const [fruit] = room.foods.splice(foodIndex, 1);
@@ -223,6 +245,7 @@ wss.on("connection", (socket) => {
           color: /^#[0-9a-f]{6}$/i.test(data.color ?? "") ? data.color : "#4dabf7",
           score: previous?.score ?? 0, totalStars: Number(saved.total_stars || 0), authenticated: Boolean(user),
           socket, snake: previous?.snake ?? [], dir: "right", nextDir: "right", grow: 0,
+          boostUntil: previous?.boostUntil ?? 0, nextMoveAt: Date.now(),
           alive: true, kills: previous?.kills ?? 0, deaths: previous?.deaths ?? 0,
         };
         if (!player.snake.length) player.snake = spawnSnake(room);
