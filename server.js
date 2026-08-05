@@ -188,7 +188,7 @@ function addAiPlayer(room, code) {
   const id = `BOT-${code}`;
   if (room.players.has(id)) return;
   const human = [...room.players.values()].find((candidate) => !candidate.isBot);
-  room.players.set(id, { id, name: `AI Lv.${room.difficulty}`, color: oppositeColor(human?.color || "#3a86ff"), score: 0, totalStars: 0, authenticated: false, socket: null, snake: spawnSnake(room), dir: "left", nextDir: "left", grow: 0, boostUntil: 0, nextMoveAt: Date.now(), moveMs: 185 - room.difficulty * 10, alive: true, lives: 3, maxLength: 4, nextHeartAt: 100, kills: 0, deaths: 0, mode: "ai", isBot: true, bestSoloLength: 0, bestAiLevel: 0, bestAiScore: 0, bestAiSurvivalMs: 0, bestAiLength: 0 });
+  room.players.set(id, { id, name: `AI Lv.${room.difficulty}`, color: oppositeColor(human?.color || "#3a86ff"), score: 0, totalStars: 0, authenticated: false, socket: null, snake: spawnSnake(room), dir: "left", nextDir: "left", grow: 0, boostUntil: 0, nextMoveAt: Date.now(), respawnAt: 0, moveMs: 185 - room.difficulty * 10, alive: true, lives: 3, maxLength: 4, nextHeartAt: 100, kills: 0, deaths: 0, mode: "ai", isBot: true, bestSoloLength: 0, bestAiLevel: 0, bestAiScore: 0, bestAiSurvivalMs: 0, bestAiLength: 0 });
 }
 
 function opposite(a, b) {
@@ -209,6 +209,7 @@ function respawn(room, player) {
   player.alive = true;
   player.grow = 0;
   player.boostUntil = 0;
+  player.respawnAt = 0;
   player.nextMoveAt = Date.now();
 }
 
@@ -250,6 +251,12 @@ function restartRoom(code, room, player) {
 function tickRoom(code, room) {
   if (!room.players.size) return;
   const now = Date.now();
+  for (const contestant of room.players.values()) {
+    if (!contestant.alive && (room.mode === "online" || contestant.lives > 0) && contestant.respawnAt && now >= contestant.respawnAt && !room.finished) {
+      respawn(room, contestant);
+      broadcast(code, { type: "respawn", playerId: contestant.id });
+    }
+  }
   const bodies = new Map();
   for (const player of room.players.values()) {
     if (!player.alive) continue;
@@ -270,6 +277,8 @@ function tickRoom(code, room) {
       player.alive = false;
       player.deaths += 1;
       if (room.mode !== "online") player.lives -= 1;
+      player.respawnAt = now + 1800;
+      player.snake = [];
       event = { type: "death", victimId: player.id, killerId: hit && hit.player.id !== player.id ? hit.player.id : null, lives: player.lives };
       if (hit && hit.player.id !== player.id) {
         hit.player.score += 2;
@@ -285,12 +294,6 @@ function tickRoom(code, room) {
         } else finishRun(code, room, player, "hearts");
         continue;
       }
-      setTimeout(() => {
-        if (room.players.has(player.id) && !room.finished) {
-          respawn(room, player);
-          broadcast(code, { type: "respawn", playerId: player.id });
-        }
-      }, 1800);
       continue;
     }
 
@@ -381,7 +384,7 @@ wss.on("connection", (socket) => {
           mode, bestSoloLength: Number(saved.best_solo_length || 0), bestSoloTimeMs: Number(saved.best_solo_time_ms || 0),
           bestAiLevel: Number(saved.best_ai_level || 0), bestAiScore: Number(saved.best_ai_score || 0), bestAiSurvivalMs: Number(saved.best_ai_survival_ms || 0), bestAiLength: Number(saved.best_ai_length || 0), moveMs: NORMAL_MOVE_MS, isBot: false,
           socket, snake: previous?.snake ?? [], dir: "right", nextDir: "right", grow: 0,
-          boostUntil: previous?.boostUntil ?? 0, nextMoveAt: Date.now(),
+          boostUntil: previous?.boostUntil ?? 0, nextMoveAt: Date.now(), respawnAt: 0,
           alive: true, lives: mode === "online" ? 0 : 3, maxLength: 4, nextHeartAt: 100, kills: previous?.kills ?? 0, deaths: previous?.deaths ?? 0,
         };
         if (!player.snake.length) player.snake = spawnSnake(room);
