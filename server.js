@@ -146,23 +146,37 @@ function chooseBotDirection(room, player) {
   const directions = ["up", "down", "left", "right"];
   const delta = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
   const occupied = new Set([...room.players.values()].flatMap((p) => p.snake.map((c) => `${c.x},${c.y}`)));
-  const safe = directions.filter((direction) => {
-    if (opposite(player.dir, direction)) return false;
+  if (player.grow === 0) { const tail = player.snake[player.snake.length - 1]; occupied.delete(`${tail.x},${tail.y}`); }
+  const areaFrom = (start) => {
+    const queue = [start], seen = new Set([`${start.x},${start.y}`]);
+    for (let index = 0; index < queue.length && queue.length < 500; index += 1) {
+      const cell = queue[index];
+      for (const [dx, dy] of Object.values(delta)) {
+        const next = { x: cell.x + dx, y: cell.y + dy }, key = `${next.x},${next.y}`;
+        if (next.x >= 0 && next.x < GRID_W && next.y >= 0 && next.y < GRID_H && !occupied.has(key) && !seen.has(key)) { seen.add(key); queue.push(next); }
+      }
+    }
+    return seen.size;
+  };
+  const safe = directions.flatMap((direction) => {
+    if (opposite(player.dir, direction)) return [];
     const [dx, dy] = delta[direction];
     const head = { x: player.snake[0].x + dx, y: player.snake[0].y + dy };
-    return head.x >= 0 && head.x < GRID_W && head.y >= 0 && head.y < GRID_H && !occupied.has(`${head.x},${head.y}`);
+    return head.x >= 0 && head.x < GRID_W && head.y >= 0 && head.y < GRID_H && !occupied.has(`${head.x},${head.y}`) ? [{ direction, head, area: areaFrom(head) }] : [];
   });
-  if (!safe.length) return;
+  if (!safe.length) return false;
   const target = room.foods.reduce((best, food) => {
     const distance = Math.abs(food.x - player.snake[0].x) + Math.abs(food.y - player.snake[0].y);
     return !best || distance < best.distance ? { food, distance } : best;
   }, null)?.food;
   const preferred = safe.sort((a, b) => {
-    const [adx, ady] = delta[a], [bdx, bdy] = delta[b];
-    return (Math.abs(player.snake[0].x + adx - target.x) + Math.abs(player.snake[0].y + ady - target.y)) - (Math.abs(player.snake[0].x + bdx - target.x) + Math.abs(player.snake[0].y + bdy - target.y));
+    const areaDifference = b.area - a.area;
+    if (areaDifference) return areaDifference;
+    return (Math.abs(a.head.x - target.x) + Math.abs(a.head.y - target.y)) - (Math.abs(b.head.x - target.x) + Math.abs(b.head.y - target.y));
   })[0];
   const accuracy = room.difficulty === 10 ? .99 : .38 + room.difficulty * .055;
-  player.nextDir = Math.random() < accuracy ? preferred : safe[Math.floor(Math.random() * safe.length)];
+  player.nextDir = (Math.random() < accuracy ? preferred : safe[Math.floor(Math.random() * safe.length)]).direction;
+  return true;
 }
 
 function oppositeColor(hex) {
@@ -239,11 +253,12 @@ function tickRoom(code, room) {
   for (const player of room.players.values()) {
     if (!player.alive) continue;
     if (now < player.nextMoveAt) continue;
-    if (player.isBot) chooseBotDirection(room, player);
+    if (player.isBot && !chooseBotDirection(room, player)) { player.nextMoveAt = now + player.moveMs; continue; }
     player.nextMoveAt = now + (player.boostUntil > now ? BOOST_MOVE_MS : (player.moveMs || NORMAL_MOVE_MS));
     const head = nextHead(player);
     const outside = head.x < 0 || head.x >= GRID_W || head.y < 0 || head.y >= GRID_H;
-    const hit = bodies.get(`${head.x},${head.y}`);
+    let hit = bodies.get(`${head.x},${head.y}`);
+    if (hit?.player === player && hit.index === player.snake.length - 1 && player.grow === 0) hit = null;
     if (outside || hit) {
       player.alive = false;
       player.deaths += 1;
