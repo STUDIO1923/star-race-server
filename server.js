@@ -56,8 +56,8 @@ async function refreshSoloLeaderboard() {
 
 async function refreshAiLeaderboard() {
   if (!persistenceEnabled) return;
-  const rows = await supabaseRequest("/rest/v1/player_saves?select=display_name,best_ai_level,best_ai_survival_ms,best_ai_length&best_ai_survival_ms=gt.0&order=best_ai_level.desc,best_ai_survival_ms.desc,best_ai_length.desc&limit=10");
-  aiLeaderboard = (rows ?? []).map((row) => ({ name: row.display_name || "Player", level: Number(row.best_ai_level || 0), survivalMs: Number(row.best_ai_survival_ms || 0), length: Number(row.best_ai_length || 0) }));
+  const rows = await supabaseRequest("/rest/v1/player_saves?select=display_name,best_ai_level,best_ai_score,best_ai_survival_ms,best_ai_length&best_ai_survival_ms=gt.0&order=best_ai_level.desc,best_ai_survival_ms.desc,best_ai_length.desc&limit=10");
+  aiLeaderboard = (rows ?? []).map((row) => ({ name: row.display_name || "Player", level: Number(row.best_ai_level || 0), winsMask: Number(row.best_ai_score || 0) & 1023, survivalMs: Number(row.best_ai_survival_ms || 0), length: Number(row.best_ai_length || 0) }));
 }
 
 function saveProgress(player) {
@@ -216,19 +216,26 @@ function finishRun(code, room, player, reason = "hearts") {
   if (room.finished || player.isBot) return;
   room.finished = true;
   const elapsedMs = Date.now() - room.startedAt;
-  player.pendingResult = { elapsedMs, length: player.maxLength, difficulty: room.difficulty };
+  player.pendingResult = { elapsedMs, length: player.maxLength, difficulty: room.difficulty, won: reason === "ai-defeated" };
   broadcast(code, { type: "gameOver", playerId: player.id, reason, elapsedMs, length: player.maxLength });
 }
 
 function savePendingResult(room, player) {
   const result = player.pendingResult;
   if (!result || !player.authenticated) return;
+  let changed = false;
   if (player.mode === "solo" && (result.length > player.bestSoloLength || (result.length === player.bestSoloLength && (!player.bestSoloTimeMs || result.elapsedMs < player.bestSoloTimeMs)))) {
-    player.bestSoloLength = result.length; player.bestSoloTimeMs = result.elapsedMs; saveProgress(player);
+    player.bestSoloLength = result.length; player.bestSoloTimeMs = result.elapsedMs; changed = true;
   }
   if (player.mode === "ai" && (result.difficulty > player.bestAiLevel || (result.difficulty === player.bestAiLevel && (result.elapsedMs > player.bestAiSurvivalMs || (result.elapsedMs === player.bestAiSurvivalMs && result.length > player.bestAiLength))))) {
-    player.bestAiLevel = result.difficulty; player.bestAiSurvivalMs = result.elapsedMs; player.bestAiLength = result.length; saveProgress(player);
+    player.bestAiLevel = result.difficulty; player.bestAiSurvivalMs = result.elapsedMs; player.bestAiLength = result.length; changed = true;
   }
+  if (player.mode === "ai" && result.won) {
+    const winBit = 1 << (result.difficulty - 1);
+    const nextMask = (player.bestAiScore | winBit) & 1023;
+    if (nextMask !== player.bestAiScore) { player.bestAiScore = nextMask; changed = true; }
+  }
+  if (changed) saveProgress(player);
 }
 
 function restartRoom(code, room, player) {
@@ -407,3 +414,4 @@ wss.on("connection", (socket) => {
 });
 
 server.listen(port, "0.0.0.0", () => console.log(`Snake Arena server listening on ${port}`));
+
