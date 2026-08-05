@@ -3,6 +3,9 @@ import { WebSocketServer, WebSocket } from "ws";
 
 const port = Number(process.env.PORT || 10000);
 const rooms = new Map();
+const ADMIN_EMAIL = "jenwzch@gmail.com";
+const adminSockets = new Set();
+const adminTotals = { peakOnline: 0, sessionsStarted: 0, gamesRestarted: 0 };
 const GRID_W = 60;
 const GRID_H = 40;
 const FOOD_COUNT = 10;
@@ -140,6 +143,30 @@ function broadcast(code, event) {
   for (const player of getRoom(code).players.values()) {
     if (player.socket?.readyState === WebSocket.OPEN) player.socket.send(message);
   }
+}
+
+function adminSnapshot() {
+  const modes = { online: 0, solo: 0, ai: 0 };
+  const roomCounts = { online: 0, solo: 0, ai: 0 };
+  let online = 0, playing = 0, authenticated = 0, guests = 0, bots = 0;
+  for (const room of rooms.values()) {
+    const humans = [...room.players.values()].filter((player) => !player.isBot && player.socket?.readyState === WebSocket.OPEN);
+    if (humans.length) roomCounts[room.mode] += 1;
+    for (const player of room.players.values()) {
+      if (player.isBot) { bots += 1; continue; }
+      if (player.socket?.readyState !== WebSocket.OPEN) continue;
+      online += 1; modes[room.mode] += 1;
+      if (!room.finished) playing += 1;
+      if (player.authenticated) authenticated += 1; else guests += 1;
+    }
+  }
+  adminTotals.peakOnline = Math.max(adminTotals.peakOnline, online);
+  return { type: "adminStats", generatedAt: Date.now(), uptimeSeconds: Math.floor(process.uptime()), online, playing, authenticated, guests, bots, peakOnline: adminTotals.peakOnline, sessionsStarted: adminTotals.sessionsStarted, gamesRestarted: adminTotals.gamesRestarted, rooms: { total: roomCounts.online + roomCounts.solo + roomCounts.ai, ...roomCounts }, modes };
+}
+
+function broadcastAdminStats() {
+  const message = JSON.stringify(adminSnapshot());
+  for (const socket of adminSockets) if (socket.readyState === WebSocket.OPEN) socket.send(message);
 }
 
 function chooseBotDirection(room, player) {
@@ -352,6 +379,7 @@ refreshSoloLeaderboard().catch(() => {});
 refreshAiLeaderboard().catch(() => {});
 setInterval(() => refreshSoloLeaderboard().catch(() => {}), 30000);
 setInterval(() => refreshAiLeaderboard().catch(() => {}), 30000);
+setInterval(broadcastAdminStats, 1000);
 
 const server = http.createServer((_request, response) => {
   response.setHeader("access-control-allow-origin", "*");
@@ -367,6 +395,16 @@ wss.on("connection", (socket) => {
   socket.on("message", async (raw) => {
     try {
       const data = JSON.parse(raw.toString());
+      if (data.type === "adminSubscribe") {
+        const user = await authenticatedUser(data.accessToken).catch(() => null);
+        if (String(user?.email || "").toLowerCase() !== ADMIN_EMAIL) {
+          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "adminError", message: "forbidden" }));
+          return;
+        }
+        adminSockets.add(socket);
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(adminSnapshot()));
+        return;
+      }
       if (data.type === "join") {
         // Login/save outages must never prevent a player from entering the arena.
         const user = await authenticatedUser(data.accessToken).catch((error) => {
@@ -402,6 +440,7 @@ wss.on("connection", (socket) => {
         };
         if (!player.snake.length) player.snake = spawnSnake(room);
         room.players.set(currentPlayer, player);
+        adminTotals.sessionsStarted += 1;
         if (mode === "ai") addAiPlayer(room, currentRoom);
         broadcast(currentRoom, { type: "join", playerId: currentPlayer });
       }
@@ -413,7 +452,7 @@ wss.on("connection", (socket) => {
       if (data.type === "restart" && currentRoom) {
         const room = getRoom(currentRoom);
         const player = room.players.get(currentPlayer);
-        if (player && room.finished) restartRoom(currentRoom, room, player);
+        if (player && room.finished) { adminTotals.gamesRestarted += 1; restartRoom(currentRoom, room, player); }
       }
     } catch {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "error", message: "invalid message" }));
@@ -421,6 +460,7 @@ wss.on("connection", (socket) => {
   });
 
   socket.on("close", () => {
+    adminSockets.delete(socket);
     if (!currentRoom || !currentPlayer) return;
     const room = getRoom(currentRoom);
     room.players.delete(currentPlayer);
