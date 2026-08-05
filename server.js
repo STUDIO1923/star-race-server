@@ -7,6 +7,13 @@ const GRID_W = 60;
 const GRID_H = 40;
 const FOOD_COUNT = 10;
 const TICK_MS = 125;
+const FRUIT_TYPES = [
+  { kind: "apple", points: 1, growth: 2, weight: 34 },
+  { kind: "orange", points: 1, growth: 2, weight: 26 },
+  { kind: "grape", points: 2, growth: 3, weight: 18 },
+  { kind: "banana", points: 2, growth: 3, weight: 14 },
+  { kind: "watermelon", points: 3, growth: 4, weight: 8 },
+];
 const supabaseUrl = String(process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const supabaseServiceKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "");
 const persistenceEnabled = Boolean(supabaseUrl && supabaseServiceKey);
@@ -66,8 +73,20 @@ function spawnSnake(room) {
   return [0, 1, 2, 3].map((offset) => ({ x: startX - offset, y: head.y }));
 }
 
+function randomFruit() {
+  let roll = Math.random() * FRUIT_TYPES.reduce((sum, fruit) => sum + fruit.weight, 0);
+  for (const fruit of FRUIT_TYPES) {
+    roll -= fruit.weight;
+    if (roll <= 0) return fruit;
+  }
+  return FRUIT_TYPES[0];
+}
+
 function addFood(room) {
-  while (room.foods.length < FOOD_COUNT) room.foods.push(freeCell(room));
+  while (room.foods.length < FOOD_COUNT) {
+    const cell = freeCell(room);
+    room.foods.push({ ...cell, ...randomFruit() });
+  }
 }
 
 function getRoom(code) {
@@ -150,11 +169,11 @@ function tickRoom(code, room) {
     player.snake.unshift(head);
     const foodIndex = room.foods.findIndex((food) => food.x === head.x && food.y === head.y);
     if (foodIndex >= 0) {
-      room.foods.splice(foodIndex, 1);
-      player.score += 1;
-      player.totalStars += 1;
-      player.grow += 2;
-      event = { type: "fruit", playerId: player.id };
+      const [fruit] = room.foods.splice(foodIndex, 1);
+      player.score += fruit.points;
+      player.totalStars += fruit.points;
+      player.grow += fruit.growth;
+      event = { type: "fruit", playerId: player.id, kind: fruit.kind, points: fruit.points };
       saveProgress(player);
       addFood(room);
     }
