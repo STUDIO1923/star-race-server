@@ -49,7 +49,10 @@ function clean(value, max = 24) {
 }
 
 function freeCell(room) {
-  const occupied = new Set([...room.players.values()].flatMap((p) => p.snake.map((c) => `${c.x},${c.y}`)));
+  const occupied = new Set([
+    ...room.foods.map((c) => `${c.x},${c.y}`),
+    ...[...room.players.values()].flatMap((p) => p.snake.map((c) => `${c.x},${c.y}`)),
+  ]);
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const cell = { x: 2 + Math.floor(Math.random() * (GRID_W - 4)), y: 2 + Math.floor(Math.random() * (GRID_H - 4)) };
     if (!occupied.has(`${cell.x},${cell.y}`)) return cell;
@@ -59,7 +62,8 @@ function freeCell(room) {
 
 function spawnSnake(room) {
   const head = freeCell(room);
-  return [0, 1, 2, 3].map((offset) => ({ x: head.x - offset, y: head.y }));
+  const startX = Math.max(5, head.x);
+  return [0, 1, 2, 3].map((offset) => ({ x: startX - offset, y: head.y }));
 }
 
 function addFood(room) {
@@ -179,13 +183,22 @@ wss.on("connection", (socket) => {
     try {
       const data = JSON.parse(raw.toString());
       if (data.type === "join") {
-        const user = await authenticatedUser(data.accessToken);
+        // Login/save outages must never prevent a player from entering the arena.
+        const user = await authenticatedUser(data.accessToken).catch((error) => {
+          console.error("Auth lookup failed; continuing as guest:", error.message);
+          return null;
+        });
         currentRoom = clean(data.room, 6).toUpperCase() || "SNAKE1";
         currentPlayer = user?.id || clean(data.playerId, 48);
         if (!currentPlayer) return;
         const room = getRoom(currentRoom);
         const previous = room.players.get(currentPlayer);
-        const saved = user ? await loadSave(user.id) : { total_stars: 0 };
+        const saved = user
+          ? await loadSave(user.id).catch((error) => {
+              console.error("Save lookup failed; starting with zero:", error.message);
+              return { total_stars: 0 };
+            })
+          : { total_stars: 0 };
         const player = {
           id: currentPlayer, name: clean(data.name, 16) || "Player",
           color: /^#[0-9a-f]{6}$/i.test(data.color ?? "") ? data.color : "#4dabf7",
