@@ -61,12 +61,12 @@ async function refreshAiLeaderboard() {
 }
 
 function saveProgress(player) {
-  if (!player.authenticated) return;
-  supabaseRequest("/rest/v1/player_saves?on_conflict=user_id", {
+  if (!player.authenticated) return Promise.resolve();
+  return supabaseRequest("/rest/v1/player_saves?on_conflict=user_id", {
     method: "POST",
     headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
     body: JSON.stringify({ user_id: player.id, display_name: player.name, total_stars: player.totalStars, best_solo_length: player.bestSoloLength || 0, best_solo_time_ms: player.bestSoloTimeMs || 0, best_ai_level: player.bestAiLevel || 0, best_ai_score: player.bestAiScore || 0, best_ai_survival_ms: player.bestAiSurvivalMs || 0, best_ai_length: player.bestAiLength || 0, updated_at: new Date().toISOString() }),
-  }).then(() => player.mode === "solo" ? refreshSoloLeaderboard() : player.mode === "ai" ? refreshAiLeaderboard() : null).catch(() => {});
+  }).then(async () => { if (player.mode === "solo") await refreshSoloLeaderboard(); else if (player.mode === "ai") await refreshAiLeaderboard(); for (const [code] of rooms) broadcast(code); }).catch(() => {});
 }
 
 function clean(value, max = 24) {
@@ -145,7 +145,7 @@ function broadcast(code, event) {
 function chooseBotDirection(room, player) {
   const directions = ["up", "down", "left", "right"];
   const delta = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
-  const occupied = new Set([...room.players.values()].flatMap((p) => p.snake.slice(0, -1).map((c) => `${c.x},${c.y}`)));
+  const occupied = new Set([...room.players.values()].flatMap((p) => p.snake.map((c) => `${c.x},${c.y}`)));
   const safe = directions.filter((direction) => {
     if (opposite(player.dir, direction)) return false;
     const [dx, dy] = delta[direction];
@@ -161,13 +161,20 @@ function chooseBotDirection(room, player) {
     const [adx, ady] = delta[a], [bdx, bdy] = delta[b];
     return (Math.abs(player.snake[0].x + adx - target.x) + Math.abs(player.snake[0].y + ady - target.y)) - (Math.abs(player.snake[0].x + bdx - target.x) + Math.abs(player.snake[0].y + bdy - target.y));
   })[0];
-  player.nextDir = Math.random() < .3 + room.difficulty * .065 ? preferred : safe[Math.floor(Math.random() * safe.length)];
+  const accuracy = room.difficulty === 10 ? .99 : .38 + room.difficulty * .055;
+  player.nextDir = Math.random() < accuracy ? preferred : safe[Math.floor(Math.random() * safe.length)];
+}
+
+function oppositeColor(hex) {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return `#${(0xffffff ^ value).toString(16).padStart(6, "0")}`;
 }
 
 function addAiPlayer(room, code) {
   const id = `BOT-${code}`;
   if (room.players.has(id)) return;
-  room.players.set(id, { id, name: `AI Lv.${room.difficulty}`, color: "#ff3b5c", score: 0, totalStars: 0, authenticated: false, socket: null, snake: spawnSnake(room), dir: "left", nextDir: "left", grow: 0, boostUntil: 0, nextMoveAt: Date.now(), moveMs: 185 - room.difficulty * 10, alive: true, lives: 3, maxLength: 4, nextHeartAt: 100, kills: 0, deaths: 0, mode: "ai", isBot: true, bestSoloLength: 0, bestAiLevel: 0, bestAiScore: 0, bestAiSurvivalMs: 0, bestAiLength: 0 });
+  const human = [...room.players.values()].find((candidate) => !candidate.isBot);
+  room.players.set(id, { id, name: `AI Lv.${room.difficulty}`, color: oppositeColor(human?.color || "#3a86ff"), score: 0, totalStars: 0, authenticated: false, socket: null, snake: spawnSnake(room), dir: "left", nextDir: "left", grow: 0, boostUntil: 0, nextMoveAt: Date.now(), moveMs: 185 - room.difficulty * 10, alive: true, lives: 3, maxLength: 4, nextHeartAt: 100, kills: 0, deaths: 0, mode: "ai", isBot: true, bestSoloLength: 0, bestAiLevel: 0, bestAiScore: 0, bestAiSurvivalMs: 0, bestAiLength: 0 });
 }
 
 function opposite(a, b) {
@@ -334,6 +341,10 @@ wss.on("connection", (socket) => {
         const difficulty = Math.max(1, Math.min(10, Number(data.difficulty) || 1));
         currentRoom = mode === "solo" ? `SOLO-${currentPlayer}` : mode === "ai" ? `AI-${currentPlayer}` : (clean(data.room, 6).toUpperCase() || "SNAKE1");
         const room = getRoom(currentRoom, mode, difficulty);
+        const usedColors = new Set([...room.players.values()].map((contestant) => contestant.color));
+        const requestedColor = /^#[0-9a-f]{6}$/i.test(data.color ?? "") ? data.color : "#3a86ff";
+        const distinctColors = ["#3a86ff", "#ff3b5c", "#39d98a", "#ffbe0b", "#9b5de5", "#ff7f11"];
+        const chosenColor = usedColors.has(requestedColor) ? (distinctColors.find((color) => !usedColors.has(color)) || oppositeColor(requestedColor)) : requestedColor;
         const previous = room.players.get(currentPlayer);
         const saved = user
           ? await loadSave(user.id).catch((error) => {
@@ -343,7 +354,7 @@ wss.on("connection", (socket) => {
           : { total_stars: 0, best_solo_length: 0, best_solo_time_ms: 0, best_ai_level: 0, best_ai_score: 0, best_ai_survival_ms: 0, best_ai_length: 0 };
         const player = {
           id: currentPlayer, name: clean(data.name, 16) || "Player",
-          color: /^#[0-9a-f]{6}$/i.test(data.color ?? "") ? data.color : "#4dabf7",
+          color: chosenColor,
           score: previous?.score ?? 0, totalStars: Number(saved.total_stars || 0), authenticated: Boolean(user),
           mode, bestSoloLength: Number(saved.best_solo_length || 0), bestSoloTimeMs: Number(saved.best_solo_time_ms || 0),
           bestAiLevel: Number(saved.best_ai_level || 0), bestAiScore: Number(saved.best_ai_score || 0), bestAiSurvivalMs: Number(saved.best_ai_survival_ms || 0), bestAiLength: Number(saved.best_ai_length || 0), moveMs: NORMAL_MOVE_MS, isBot: false,
